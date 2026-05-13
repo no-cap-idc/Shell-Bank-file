@@ -1,0 +1,409 @@
+-- ============================================================
+-- AWS RDS Oracle 전체 초기화 스크립트
+--
+-- 실행 방법:
+--   1. bastion 서버 SSH 접속
+--   2. sqlplus admin/<비밀번호>@sk29pentest-oracle.cp4mqrgojf9g.ap-northeast-2.rds.amazonaws.com:1521/SBANK @init-db-aws.sql
+--
+-- 실행 순서:
+--   1단계: ADMIN으로 접속 → 유저 생성
+--   2단계: SBANK_ADMIN으로 접속 → 테이블/시퀀스 생성
+--   3단계: ADMIN으로 접속 → 권한 부여 + 시노님 생성
+-- ============================================================
+
+
+-- ============================================================
+-- [1단계] ADMIN으로 접속 후 실행
+-- ============================================================
+
+-- sbank_admin: 테이블 소유자 + BOS-back 접속 계정
+CREATE USER sbank_admin IDENTIFIED BY "Sk29@Adm!nX7q2";
+GRANT CONNECT, RESOURCE TO sbank_admin;
+GRANT CREATE TABLE, CREATE SEQUENCE, CREATE SYNONYM TO sbank_admin;
+ALTER USER sbank_admin QUOTA UNLIMITED ON USERS;
+
+-- sbank_app: Web-back 접속 계정 (시노님으로 접근)
+CREATE USER sbank_app IDENTIFIED BY "Rk84#AppW3z9$Lm";
+GRANT CONNECT TO sbank_app;
+GRANT CREATE SYNONYM TO sbank_app;
+ALTER USER sbank_app QUOTA UNLIMITED ON USERS;
+
+
+-- ============================================================
+-- [2단계] SBANK_ADMIN으로 재접속 후 실행
+-- sqlplus sbank_admin/"Sk29@Adm!nX7q2"@sk29pentest-oracle.cp4mqrgojf9g.ap-northeast-2.rds.amazonaws.com:1521/SBANK
+-- ============================================================
+
+-- 1. 고객 관리 (Customer)
+CREATE TABLE customers (
+    customer_id  NUMBER PRIMARY KEY,
+    name         VARCHAR2(100),
+    resident_id  VARCHAR2(255),
+    phone        VARCHAR2(20),
+    email        VARCHAR2(100),
+    address      VARCHAR2(255),
+    created_at   TIMESTAMP DEFAULT SYSTIMESTAMP,
+    status       VARCHAR2(20)
+);
+
+-- 2. 인터넷뱅킹 유저 (Users)
+CREATE TABLE users (
+    user_id       NUMBER PRIMARY KEY,
+    customer_id   NUMBER,
+    login_id      VARCHAR2(50),
+    password_hash VARCHAR2(255),
+    last_login    TIMESTAMP,
+    status        VARCHAR2(20),
+    role          VARCHAR2(20) DEFAULT 'USER',
+    CONSTRAINT fk_users_customer FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+
+-- 4. 계좌 관리 (Accounts)
+CREATE TABLE accounts (
+    account_id           NUMBER PRIMARY KEY,
+    customer_id          NUMBER,
+    account_number       VARCHAR2(50),
+    account_type         VARCHAR2(50),
+    depositor_name       VARCHAR2(100) NOT NULL,
+    balance              NUMBER(19,2) DEFAULT 0,
+    currency             VARCHAR2(10),
+    status               VARCHAR2(20),
+    account_password     VARCHAR2(255),
+    account_nickname     VARCHAR2(255),
+    source_account_id    NUMBER,
+    pending_init_deposit NUMBER(19,2),
+    created_at           TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT fk_accounts_customer FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+
+-- 5. 거래 내역 (Transactions)
+CREATE TABLE transactions (
+    transaction_id   NUMBER PRIMARY KEY,
+    account_id       NUMBER,
+    target_account   VARCHAR2(50),
+    amount           NUMBER,
+    transaction_type VARCHAR2(20),
+    description      VARCHAR2(255),
+    balance_after    NUMBER,
+    transaction_time TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT fk_transactions_account FOREIGN KEY (account_id) REFERENCES accounts(account_id)
+);
+
+-- 6. 자동이체 (Auto Transfers)
+CREATE TABLE auto_transfers (
+    auto_transfer_id NUMBER PRIMARY KEY,
+    account_id       NUMBER NOT NULL,
+    target_account   VARCHAR2(50) NOT NULL,
+    amount           NUMBER NOT NULL,
+    description      VARCHAR2(255),
+    transfer_day     NUMBER(2),
+    status           VARCHAR2(20),
+    created_at       TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT fk_auto_transfer_account FOREIGN KEY (account_id) REFERENCES accounts(account_id)
+);
+
+-- 7. 카드 (Cards)
+CREATE TABLE cards (
+    card_id        NUMBER PRIMARY KEY,
+    customer_id    NUMBER,
+    account_id     NUMBER,
+    card_number    VARCHAR2(50),
+    account_number VARCHAR2(50),
+    card_pw        VARCHAR2(255),
+    card_type      VARCHAR2(20),
+    expiry_date    DATE,
+    status         VARCHAR2(20),
+    payment_day    NUMBER(2),
+    CONSTRAINT fk_cards_customer FOREIGN KEY (customer_id) REFERENCES customers(customer_id),
+    CONSTRAINT fk_cards_account  FOREIGN KEY (account_id)  REFERENCES accounts(account_id)
+);
+
+-- 8. 대출 (Loans)
+CREATE TABLE loans (
+    loan_id           NUMBER PRIMARY KEY,
+    customer_id       NUMBER,
+    from_account_id   NUMBER,
+    to_account_id     NUMBER,
+    loan_type         VARCHAR2(50),
+    amount            NUMBER(19,2),
+    interest_rate     NUMBER(5,2),
+    start_date        DATE,
+    end_date          DATE,
+    status            VARCHAR2(20),
+    remaining_balance NUMBER(19,2),
+    created_at        TIMESTAMP,
+    CONSTRAINT fk_loans_customer      FOREIGN KEY (customer_id)     REFERENCES customers(customer_id),
+    CONSTRAINT fk_loans_from_account  FOREIGN KEY (from_account_id) REFERENCES accounts(account_id),
+    CONSTRAINT fk_loans_to_account    FOREIGN KEY (to_account_id)   REFERENCES accounts(account_id)
+);
+
+-- 9. 공지사항 (Notices)
+CREATE TABLE notices (
+    notice_id  NUMBER PRIMARY KEY,
+    title      VARCHAR2(255),
+    content    VARCHAR2(4000),
+    created_by NUMBER,
+    category   VARCHAR2(50)  DEFAULT '서비스',
+    is_pinned  NUMBER(1)     DEFAULT 0,
+    created_at TIMESTAMP DEFAULT SYSTIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+-- 10. 알림 (Notifications)
+CREATE TABLE notifications (
+    notification_id   NUMBER PRIMARY KEY,
+    user_id           NUMBER NOT NULL,
+    notification_type VARCHAR2(50),
+    title             VARCHAR2(255),
+    message           VARCHAR2(1000),
+    is_read           NUMBER(1) DEFAULT 0,
+    created_at        TIMESTAMP DEFAULT SYSTIMESTAMP
+);
+
+-- 11. 인증 수단 (Auth Methods)
+CREATE TABLE auth_methods (
+    auth_id     NUMBER PRIMARY KEY,
+    customer_id NUMBER,
+    auth_type   VARCHAR2(50),
+    secret_key  VARCHAR2(255),
+    created_at  TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT fk_auth_methods_customer FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+
+-- 12. 로그인 로그 (Login Logs)
+CREATE TABLE login_logs (
+    log_id     NUMBER PRIMARY KEY,
+    user_id    NUMBER,
+    ip_address VARCHAR2(50),
+    user_agent VARCHAR2(255),
+    login_time TIMESTAMP DEFAULT SYSTIMESTAMP,
+    result     VARCHAR2(20),
+    CONSTRAINT fk_login_logs_user FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+-- 13. 거래 로그 (Transaction Logs)
+CREATE TABLE transaction_logs (
+    log_id         NUMBER PRIMARY KEY,
+    transaction_id NUMBER,
+    ip_address     VARCHAR2(50),
+    device         VARCHAR2(100),
+    created_at     TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT fk_tx_logs_tx FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
+);
+
+-- 14. 상환 이력 (Repayments)
+CREATE TABLE repayments (
+    repayment_id     NUMBER PRIMARY KEY,
+    loan_id          NUMBER NOT NULL,
+    repayment_date   TIMESTAMP NOT NULL,
+    amount           NUMBER(19,2) NOT NULL,
+    principal        NUMBER(19,2) NOT NULL,
+    interest         NUMBER(19,2) NOT NULL,
+    remaining_amount NUMBER(19,2) NOT NULL,
+    CONSTRAINT fk_repayments_loan FOREIGN KEY (loan_id) REFERENCES loans(loan_id)
+);
+
+-- 15. 보안 소식 (Security News)
+CREATE TABLE security_news (
+    security_news_id NUMBER PRIMARY KEY,
+    title            VARCHAR2(255) NOT NULL,
+    content          VARCHAR2(4000),
+    created_by       NUMBER,
+    created_at       TIMESTAMP DEFAULT SYSTIMESTAMP,
+    updated_at       TIMESTAMP
+);
+
+-- 16. 첨부파일 (Attachments)
+CREATE TABLE attachments (
+    file_id           NUMBER PRIMARY KEY,
+    reference_type    VARCHAR2(50),
+    reference_id      NUMBER,
+    file_url          VARCHAR2(1000),
+    original_filename VARCHAR2(255),
+    file_extension    VARCHAR2(20),
+    file_size         NUMBER,
+    created_at        TIMESTAMP DEFAULT SYSTIMESTAMP
+);
+
+-- 17. 배너 (Banners)
+CREATE TABLE banners (
+    banner_id  NUMBER PRIMARY KEY,
+    title      VARCHAR2(255),
+    subtitle   VARCHAR2(255),
+    colors     VARCHAR2(100),
+    is_active  NUMBER(1) DEFAULT 1,
+    start_date DATE,
+    end_date   DATE,
+    sort_order NUMBER DEFAULT 1,
+    image_url  VARCHAR2(500)
+);
+
+-- 18. 관리자 유저 (Admin Users) - BOS-back 전용
+CREATE TABLE admin_users (
+    admin_id      NUMBER PRIMARY KEY,
+    login_id      VARCHAR2(100) UNIQUE NOT NULL,
+    password_hash VARCHAR2(255) NOT NULL,
+    name          VARCHAR2(100),
+    phone         VARCHAR2(20),
+    email         VARCHAR2(100),
+    status        VARCHAR2(20) DEFAULT 'ACTIVE',
+    role          VARCHAR2(20) DEFAULT 'ADMIN',
+    last_login    TIMESTAMP,
+    created_at    TIMESTAMP DEFAULT SYSTIMESTAMP
+);
+
+-- 19. 관리자 로그인 로그 (Admin Login Logs) - BOS-back 전용
+CREATE TABLE admin_login_logs (
+    log_id      NUMBER PRIMARY KEY,
+    admin_id    NUMBER REFERENCES admin_users(admin_id),
+    ip_address  VARCHAR2(50),
+    user_agent  VARCHAR2(255),
+    login_time  TIMESTAMP DEFAULT SYSTIMESTAMP,
+    result      VARCHAR2(20)
+);
+
+-- 20. 감사 로그 (Audit Logs) - BOS-back 전용
+CREATE TABLE audit_logs (
+    log_id         NUMBER PRIMARY KEY,
+    admin_id       NUMBER NOT NULL,
+    admin_login_id VARCHAR2(100),
+    domain         VARCHAR2(100) NOT NULL,
+    method         VARCHAR2(100) NOT NULL,
+    parameters     VARCHAR2(2000),
+    result         VARCHAR2(2000),
+    status         VARCHAR2(20),
+    ip_address     VARCHAR2(50),
+    execution_time NUMBER,
+    created_at     TIMESTAMP NOT NULL
+);
+
+-- 21. 송금 (Remittance)
+CREATE TABLE remittance (
+    id           NUMBER PRIMARY KEY,
+    sender_id    NUMBER,
+    recipient_id VARCHAR2(100),
+    amount       NUMBER NOT NULL,
+    currency     VARCHAR2(10) NOT NULL,
+    status       VARCHAR2(20) DEFAULT 'PENDING_SANCTION',
+    updated_at   TIMESTAMP
+);
+
+-- 22. 앱 서명 화이트리스트 (Allowed App Signatures)
+CREATE TABLE allowed_app_signatures (
+    id             NUMBER PRIMARY KEY,
+    signature_hash VARCHAR2(64) UNIQUE NOT NULL,
+    app_version    VARCHAR2(20) NOT NULL,
+    description    VARCHAR2(255),
+    enabled        NUMBER(1) DEFAULT 1,
+    created_at     TIMESTAMP
+);
+
+-- 23. 1:1 문의 (Inquiries)
+CREATE TABLE inquiries (
+    inquiry_id  NUMBER PRIMARY KEY,
+    user_id     NUMBER,
+    title       VARCHAR2(255),
+    content     CLOB,
+    answer      CLOB,
+    status      VARCHAR2(20),
+    created_at  TIMESTAMP,
+    answered_at TIMESTAMP
+);
+
+-- ============================================================
+-- 시퀀스
+-- ============================================================
+CREATE SEQUENCE seq_customers        START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_users            START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_accounts         START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_transactions     START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_auto_transfers   START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_cards            START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_loans            START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_notices          START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_notifications    START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_auth_methods     START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_login_logs       START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_transaction_logs START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_attachments      START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_repayments       START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_security_news    START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_banners          START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_admin_users      START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_admin_login_logs START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_audit_logs       START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_remittance            START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_allowed_app_signatures START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE seq_inquiries              START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+
+-- ============================================================
+-- 초기 데이터
+-- ============================================================
+
+-- 일반 사용자 (test@test.com / test)                                                                                                                                                          
+INSERT INTO customers (customer_id, name, phone, email, status)                        
+VALUES (seq_customers.NEXTVAL, '테스트유저', '010-0000-0000', 'test@test.com', 'ACTIVE');                                                                                                      
+                                                                                                                                                                                                
+INSERT INTO users (user_id, customer_id, login_id, password_hash, status, role)                                                                                                                
+VALUES (                                                                                                                                                                                       
+    seq_users.NEXTVAL,                                                                                                                                                                         
+    seq_customers.CURRVAL,                                                                                                                                                                     
+    'test@test.com',                                                                                                                                                                           
+    '$2b$10$dhVprDjnY1pWz24K7InP/ef/JMoEK0IAQq2eeiiMtyBzF6oBcLCki',                                                                                                                            
+    'ACTIVE',                                                                                                                                                                                  
+    'USER'                                                                                                                                                                                     
+);
+
+-- BOS 관리자 (admin@admin.com / admin)
+INSERT INTO admin_users (admin_id, login_id, password_hash, name, phone, status, role)
+VALUES (
+    seq_admin_users.NEXTVAL,
+    'admin@admin.com',
+    '$2a$10$U7js5xOrYBHcwOambWgF4ON6QvP.E9zjBdbG2XW0d8oyo5A6Vjbz.',
+    '관리자',
+    '010-2977-3313',
+    'ACTIVE',
+    'ADMIN'
+);
+
+-- 배너 초기 데이터
+INSERT INTO banners (banner_id, title, subtitle, colors, is_active, start_date, end_date, sort_order)
+VALUES (seq_banners.NEXTVAL, 'Shell Bank에 오신 것을 환영합니다', '안전하고 편리한 금융 서비스를 이용하세요', '#1e3a8a,#3b82f6', 1, SYSDATE, ADD_MONTHS(SYSDATE, 12), 1);
+
+INSERT INTO banners (banner_id, title, subtitle, colors, is_active, start_date, end_date, sort_order)
+VALUES (seq_banners.NEXTVAL, '빠른 계좌 개설', '지금 바로 온라인으로 계좌를 개설하세요', '#065f46,#10b981', 1, SYSDATE, ADD_MONTHS(SYSDATE, 12), 2);
+
+INSERT INTO banners (banner_id, title, subtitle, colors, is_active, start_date, end_date, sort_order)
+VALUES (seq_banners.NEXTVAL, '합리적인 대출 상품', '낮은 금리로 필요한 자금을 마련하세요', '#7c2d12,#f97316', 1, SYSDATE, ADD_MONTHS(SYSDATE, 12), 3);
+
+COMMIT;
+
+
+-- ============================================================
+-- [3단계] ADMIN으로 재접속 후 실행
+-- sqlplus admin/<비밀번호>@<rds-endpoint>:1521/SBANK
+-- ============================================================
+
+-- sbank_app에 모든 테이블/시퀀스 권한 부여
+BEGIN
+    FOR t IN (SELECT table_name FROM dba_tables WHERE owner = 'SBANK_ADMIN') LOOP
+        EXECUTE IMMEDIATE 'GRANT SELECT, INSERT, UPDATE, DELETE ON SBANK_ADMIN.' || t.table_name || ' TO SBANK_APP';
+    END LOOP;
+    FOR s IN (SELECT sequence_name FROM dba_sequences WHERE sequence_owner = 'SBANK_ADMIN') LOOP
+        EXECUTE IMMEDIATE 'GRANT SELECT ON SBANK_ADMIN.' || s.sequence_name || ' TO SBANK_APP';
+    END LOOP;
+END;
+/
+
+-- sbank_app 시노님 생성
+BEGIN
+    FOR t IN (SELECT table_name FROM dba_tables WHERE owner = 'SBANK_ADMIN') LOOP
+        EXECUTE IMMEDIATE 'CREATE OR REPLACE SYNONYM SBANK_APP.' || t.table_name || ' FOR SBANK_ADMIN.' || t.table_name;
+    END LOOP;
+    FOR s IN (SELECT sequence_name FROM dba_sequences WHERE sequence_owner = 'SBANK_ADMIN') LOOP
+        EXECUTE IMMEDIATE 'CREATE OR REPLACE SYNONYM SBANK_APP.' || s.sequence_name || ' FOR SBANK_ADMIN.' || s.sequence_name;
+    END LOOP;
+END;
+/
+
+COMMIT;
